@@ -1,7 +1,12 @@
-import io
 import json
+import string
 import numpy as np
+from tqdm import tqdm
 from .lib.dbengine import DBEngine
+import torchtext as text
+import os
+from torchtext.vocab import Vectors
+import pickle
 
 def load_data(sql_paths, table_paths, use_small=False):
     if not isinstance(sql_paths, list):
@@ -206,65 +211,46 @@ def epoch_acc(model, batch_size, sql_data, table_data, pred_entry, db_content, e
         st = ed
     return tot_acc_num / len(sql_data), one_acc_num / len(sql_data)
 
+def load_concat_emb(file_name1, file_name2, cache=None):
+    cache = '.vector_cache' if cache is None else cache
+    concat_emb = ConcatEmbedding(file_name1, file_name2, cache)
 
-def load_para_wemb(file_name):
-    f = io.open(file_name, 'r', encoding='utf-8')
-    lines = f.readlines()
-    ret = {}
-    if len(lines[0].split()) == 2:
-        lines.pop(0)
-    for (n,line) in enumerate(lines):
-        info = line.strip().split(' ')
-        if info[0].lower() not in ret:
-            ret[info[0]] = np.array([float(x) for x in info[1:]])
+    return None, None, concat_emb.to_dict()
 
-    return ret
-
-
-def load_comb_wemb(fn1, fn2):
-    wemb1 = load_word_emb(fn1)
-    wemb2 = load_para_wemb(fn2)
-    comb_emb = {k: wemb1.get(k, 0) + wemb2.get(k, 0) for k in set(wemb1) | set(wemb2)}
-
-    return comb_emb
-
-
-def load_concat_wemb(fn1, fn2):
-    wemb1 = load_word_emb(fn1)
-    wemb2 = load_para_wemb(fn2)
-    backup = np.zeros(300, dtype=np.float32)
-    comb_emb = {k: np.concatenate((wemb1.get(k, backup), wemb2.get(k, backup)), axis=0) for k in set(wemb1) | set(wemb2)}
-
-    return None, None, comb_emb
-
-
-def load_word_emb(file_name, load_used=False, use_small=False):
-    if not load_used:
-        print(('Loading word embedding from %s'%file_name))
-        ret = {}
-        with open(file_name, encoding="utf8") as inf:
-            for idx, line in enumerate(inf):
-                if (use_small and idx >= 5000):
-                    break
-                info = line.strip().split(' ')
-                if info[0].lower() not in ret:
-                    ret[info[0]] = np.array([float(x) for x in info[1:]])
-        return ret
-    else:
-        print ('Load used word embedding')
-        with open('glove/word2idx.json') as inf:
-            w2i = json.load(inf)
-        with open('glove/usedwordemb.npy') as inf:
-            word_emb_val = np.load(inf)
-        return w2i, word_emb_val
-
+class ConcatEmbedding(Vectors):
+    def __init__(self, name1: string, name2: string, cache=None, **kwargs):
+        self.cache_name = '.vector_cache' if cache is None else cache
+        filename1 = os.path.splitext(os.path.basename(name1))[0]
+        filename2 = os.path.splitext(os.path.basename(name2))[0]
+        self.name = f'{os.path.join(cache, filename1 + "_" + filename2)}.txt'
+        if not os.path.isfile(self.name):
+            print(f'Loading word embedding from {name1}')
+            word_emb1 = text.vocab.Vectors(name1)
+            print(f'Loading word embedding from {name2}')
+            word_emb2 = text.vocab.Vectors(name2)
+            word_set = set(word_emb1.itos) | set(word_emb2.itos)
+            with open(self.name, 'w', encoding="utf8") as fw:
+                for word in tqdm(word_set, desc=f'Concatenating[{filename1}, {filename2}]'):
+                    concat_emb = np.concatenate(
+                        (word_emb1.get_vecs_by_tokens(word), word_emb2.get_vecs_by_tokens(word)
+                        ), axis=0)
+                    concat_emb_str = ' '.join([str(x) for x in concat_emb])
+                    line = f'{word} {concat_emb_str}\n'
+                    fw.write(line)
+        print(f'Loading embeddings from concatenation of {name1} AND {name2}')
+        super(ConcatEmbedding, self).__init__(self.name, **kwargs)
+    
+    def to_dict(self):
+        return {
+            k: np.array(self[k]) for k in tqdm(self.itos, desc='Getting concatenation dictionary...')
+        }
 
 def load_word_and_type_emb(fn1, fn2, sql_data, table_data, db_content, is_list=False, use_htype=False):
     word_to_idx = {'<UNK>':0, '<BEG>':1, '<END>':2}
     word_num = 3
     N_word = 300
     embs = [np.zeros(N_word, dtype=np.float32) for _ in range(word_num)]
-    _, _, word_emb = load_concat_wemb(fn1, fn2)
+    _, _, word_emb = load_concat_emb(fn1, fn2)
 
     if is_list:
         for sql in sql_data:
